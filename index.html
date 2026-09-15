@@ -419,37 +419,30 @@
     if(T.clouds)drawHaze();
   }
 
-  // ---------- point-at-sky (device orientation, gnomonic) ------------------
-  let camQ=[1,0,0,0],camReady=false,screenAngle=0;
-  function qMul(a,b){return[a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],
-    a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
-    a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],
-    a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]];}
-  function qEulerYXZ(x,y,z){const c1=Math.cos(x/2),c2=Math.cos(y/2),c3=Math.cos(z/2),
-    s1=Math.sin(x/2),s2=Math.sin(y/2),s3=Math.sin(z/2);
-    return[c1*c2*c3+s1*s2*s3, s1*c2*c3+c1*s2*s3, c1*s2*c3-s1*c2*s3, c1*c2*s3-s1*s2*c3];}
-  function qConjRot(q,v,o){ // rotate v by conjugate of q (world -> camera)
-    const w=q[0],x=-q[1],y=-q[2],z=-q[3];
-    const tx=2*(y*v[2]-z*v[1]),ty=2*(z*v[0]-x*v[2]),tz=2*(x*v[1]-y*v[0]);
-    o[0]=v[0]+w*tx+(y*tz-z*ty);o[1]=v[1]+w*ty+(z*tx-x*tz);o[2]=v[2]+w*tz+(x*ty-y*tx);}
-  const Q1=[Math.SQRT1_2,-Math.SQRT1_2,0,0]; // -90deg about X: camera looks out the back
-  function setCam(alpha,beta,gamma){
-    const q=qEulerYXZ(beta*D2R,(alpha+state.headingOffset)*D2R,-gamma*D2R);
-    let Q=qMul(q,Q1);
-    const so=[Math.cos(-screenAngle/2),0,0,Math.sin(-screenAngle/2)];
-    Q=qMul(Q,so);camQ=Q;camReady=true;}
-  const vw=[0,0,0],vc=[0,0,0];
-  function projPoint(az,alt,o){
-    vw[0]=Math.cos(alt)*Math.sin(az);vw[1]=Math.cos(alt)*Math.cos(az);vw[2]=Math.sin(alt);
-    qConjRot(camQ,vw,vc);
-    const f=-vc[2]; if(f<=0.05)return false;
-    const focal=Math.min(W,H)*0.9*state.view.scale;
-    o[0]=W/2+vc[0]/f*focal;o[1]=H/2-vc[1]/f*focal;return true;}
+  // ---------- point-at-sky (device orientation, W3C rotation matrix) -------
+  let camReady=false,screenAngle=0,lastAngles=null;
+  let R11=1,R12=0,R13=0,R21=0,R22=1,R23=0,R31=0,R32=0,R33=1;
+  function setCam(al,be,ga){
+    lastAngles=[al,be,ga];
+    const a=(al+state.headingOffset)*D2R,b=be*D2R,g=ga*D2R;
+    const cA=Math.cos(a),sA=Math.sin(a),cB=Math.cos(b),sB=Math.sin(b),cG=Math.cos(g),sG=Math.sin(g);
+    // Device -> Earth (East,North,Up) matrix, W3C DeviceOrientation Z-X'-Y'' intrinsic order
+    R11=cA*cG-sA*sB*sG; R12=-cB*sA;       R13=cA*sG+cG*sA*sB;
+    R21=cG*sA+cA*sB*sG; R22=cA*cB;        R23=sA*sG-cA*cG*sB;
+    R31=-cB*sG;         R32=sB;           R33=cB*cG;
+    camReady=true;
+  }
+  // world (Earth ENU) vector -> screen, via transpose of R; camera looks out the phone's back (-Z)
   function projPointV(vx,vy,vz,o){
-    vw[0]=vx;vw[1]=vy;vw[2]=vz;qConjRot(camQ,vw,vc);
-    const f=-vc[2]; if(f<=0.05)return false;
+    const dx=R11*vx+R21*vy+R31*vz, dy=R12*vx+R22*vy+R32*vz, dz=R13*vx+R23*vy+R33*vz;
+    const f=-dz; if(f<=0.02)return false;
+    let xs=dx/f, ys=-dy/f;
+    const ca=Math.cos(screenAngle),sa=Math.sin(screenAngle);
+    const xr=xs*ca+ys*sa, yr=-xs*sa+ys*ca;    // compensate screen rotation (portrait = no-op)
     const focal=Math.min(W,H)*0.9*state.view.scale;
-    o[0]=W/2+vc[0]/f*focal;o[1]=H/2-vc[1]/f*focal;return true;}
+    o[0]=W/2+xr*focal; o[1]=H/2+yr*focal; return true;
+  }
+  function projPoint(az,alt,o){const c=Math.cos(alt);return projPointV(c*Math.sin(az),c*Math.cos(az),Math.sin(alt),o);}
   function drawPoint(){
     ctx.clearRect(0,0,W,H);const T=state.toggles;
     // horizon line + cardinals
@@ -597,7 +590,8 @@
   function updateScreenAngle(){screenAngle=((screen.orientation&&screen.orientation.angle)||window.orientation||0)*D2R;}
   window.addEventListener("orientationchange",updateScreenAngle);updateScreenAngle();
   function startPoint(){
-    const enable=()=>{window.addEventListener("deviceorientation",onOrient,true);state.point=true;
+    const enable=()=>{state._oevt=("ondeviceorientationabsolute" in window)?"deviceorientationabsolute":"deviceorientation";
+      window.addEventListener(state._oevt,onOrient,true);state.point=true;
       document.getElementById("pointBtn").classList.add("on");document.getElementById("pointrow").classList.add("on");
       document.getElementById("pointBtn").innerHTML="&#9678; Pointing (tap to stop)";};
     if(typeof DeviceOrientationEvent!=="undefined"&&typeof DeviceOrientationEvent.requestPermission==="function"){
@@ -606,7 +600,7 @@
     }else if("DeviceOrientationEvent" in window){enable();}
     else{alert("This device has no orientation sensors, so point-at-sky is not available.");}
   }
-  function stopPoint(){window.removeEventListener("deviceorientation",onOrient,true);state.point=false;camReady=false;
+  function stopPoint(){window.removeEventListener(state._oevt||"deviceorientation",onOrient,true);state.point=false;camReady=false;
     document.getElementById("pointBtn").classList.remove("on");document.getElementById("pointrow").classList.remove("on");
     document.getElementById("pointBtn").innerHTML="&#9678; Point at sky";draw();}
 
@@ -625,8 +619,9 @@
   starLim.addEventListener("input",()=>{state.starLimit=+starLim.value;document.getElementById("starLimVal").textContent=state.starLimit.toFixed(1);persist();requestDraw();});
   labelTh.addEventListener("input",()=>{state.labelTh=+labelTh.value;document.getElementById("labelThVal").textContent=state.labelTh.toFixed(1);persist();requestDraw();});
   document.getElementById("pointBtn").addEventListener("click",()=>{state.point?stopPoint():startPoint();});
-  document.getElementById("calL").addEventListener("click",()=>{state.headingOffset-=3;persist();});
-  document.getElementById("calR").addEventListener("click",()=>{state.headingOffset+=3;persist();});
+  function recal(){if(lastAngles){setCam(lastAngles[0],lastAngles[1],lastAngles[2]);if(state.point)draw();}}
+  document.getElementById("calL").addEventListener("click",()=>{state.headingOffset-=5;persist();recal();});
+  document.getElementById("calR").addEventListener("click",()=>{state.headingOffset+=5;persist();recal();});
 
   function open(id){document.getElementById(id).hidden=false;}function close(id){document.getElementById(id).hidden=true;}
   document.getElementById("aboutBtn").addEventListener("click",()=>open("about"));
